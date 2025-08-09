@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Cutter – Target % Attempts + flashes + stars</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin:0; padding:0; overflow:hidden; background:#eaeef3; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif }
+    canvas { display:block }
+    #hud {
+      position:fixed; left:12px; top:12px; background:rgba(255,255,255,.95);
+      border-radius:12px; padding:10px 12px; box-shadow:0 4px 14px rgba(0,0,0,.12); font-size:14px; line-height:1.5
+    }
+    #hud b { font-weight:600 }
+    .tag { padding:2px 6px; border-radius:999px; background:#e5e7eb; font-size:12px }
+    .overlay {
+      position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+      background:rgba(0,0,0,.55); color:#fff; text-align:center; padding:24px
+    }
+    .panel { background:rgba(17,24,39,.9); border:1px solid rgba(255,255,255,.1); border-radius:16px; padding:28px 32px; max-width:760px }
+    .panel h1 { margin:0 0 8px; font-size:28px }
+    .panel p { margin:6px 0; opacity:.9 }
+    .btn { display:inline-block; margin-top:14px; padding:10px 16px; border-radius:10px; background:#22c55e; color:#0b1017; font-weight:700; cursor:pointer }
+    .btn:active { transform:translateY(1px) }
+  </style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+<audio id="cutSound" src="cut.wav" preload="auto"></audio>
+<audio id="successSound" src="success.mp3" preload="auto"></audio>
+  <div id="hud">
+    <div>⭐ Stars: <b id="stars">0</b></div>
+    <div>📐 Current: <b id="curPct">—</b> <span class="tag" id="curAbs"></span></div>
+    <div>🎯 Target: <b id="target">—</b></div>
+    <div>✂️ Attempts left: <b id="steps">—</b></div>
+  </div>
+
+  <div id="front" class="overlay" style="display:none">
+    <div class="panel">
+      <h1>CUTTER</h1>
+      <p>Goal: on each attempt, cut off the target percent (e.g. 15%) within tolerance (±1%).</p>
+      <p>How to play: click once to start a cut <b>on the edge or outside</b>, move the mouse, click again to slice. The line turns green only if it crosses exactly two edges.</p>
+      <p>If you miss, the smaller piece is removed and you try again on the new shape. Leftover attempts convert to extra ⭐ stars.</p>
+      <div class="btn" id="startBtn">Start</div>
+    </div>
+  </div>
+
+  <div id="youlose" class="overlay" style="display:none">
+    <div class="panel">
+      <h1>YOU LOSE</h1>
+      <p>Target was not reached in time. Click to retry the level.</p>
+      <div class="btn" id="retryBtn">Retry</div>
+    </div>
+  </div>
+
+  <div id="youwin" class="overlay" style="display:none">
+    <div class="panel">
+      <h1>YOU WIN</h1>
+      <p>You reached the star goal! Click to play again.</p>
+      <div class="btn" id="playAgainBtn">Play again</div>
+    </div>
+  </div>
+
+<script>
+const STAR_GOAL = 10;
+const TARGET_RANGE = [3, 50];
+const TOL = 1;
+const CHECK_DECIMALS = 2;
+const cutSound = document.getElementById('cutSound');
+const successSound = document.getElementById('successSound');
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const hud = { stars: s('stars'), curPct: s('curPct'), curAbs: s('curAbs'), target: s('target'), steps: s('steps') };
+function s(id){ return document.getElementById(id); }
+
+function sizeCanvas(){ cv.width = innerWidth; cv.height = innerHeight; }
+addEventListener('resize', ()=>{ sizeCanvas(); draw(); });
+
+let screen = 'front', stars = 0, skill = 0, tier = 0;
+let stepsLeft = 0, targetPercent = 0, polygon = [];
+let originalArea = 1, currentArea = 1, clickA = null, mouse = null;
+let flash = null, starFlash = null;
+
+function area(poly){ if(!poly||poly.length<3) return 0; let s=0; for(let i=0;i<poly.length;i++){ const j=(i+1)%poly.length; s += poly[i][0]*poly[j][1]-poly[j][0]*poly[i][1]; } return Math.abs(s/2); }
+function bbox(poly){ let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity; for(const [x,y] of poly){ if(x<minX) minX=x; if(y<minY) minY=y; if(x>maxX) maxX=x; if(y>maxY) maxY=y; } return {minX,minY,maxX,maxY,w:maxX-minX,h:maxY-minY}; }
+function lerp(a,b,t){ return a+(b-a)*t; }
+function normalize(vx,vy){ const L=Math.hypot(vx,vy)||1; return [vx/L,vy/L]; }
+function extendLine(P,Q,scale=10000){ const d=normalize(Q[0]-P[0], Q[1]-P[1]); return [[P[0]-d[0]*scale, P[1]-d[1]*scale],[P[0]+d[0]*scale, P[1]+d[1]*scale]]; }
+function segIntersect(A,B,C,D){ const [x1,y1]=A,[x2,y2]=B,[x3,y3]=C,[x4,y4]=D; const den=(x1-x2)*(y3-y4)-(y1-y2)*(x3-x4); if (Math.abs(den)<1e-9) return null; const px=((x1*y2-y1*x2)*(x3-x4)-(x1-x2)*(x3*y4-y3*x4))/den; const py=((x1*y2-y1*x2)*(y3-y4)-(y1-y2)*(x3*y4-y3*x4))/den; let u; if (Math.abs(x4-x3) > Math.abs(y4-y3)) u = (px - x3)/(x4 - x3); else u = (py - y3)/(y4 - y3); if (u < -1e-9 || u > 1+1e-9) return null; return {x:px,y:py}; }
+
+function pointInPoly(pt, poly){
+  const [x,y]=pt; let inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const xi=poly[i][0], yi=poly[i][1], xj=poly[j][0], yj=poly[j][1];
+    const intersect = ((yi>y)!==(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi+1e-12) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+function distPointToSeg(px,py, ax,ay, bx,by){
+  const vx=bx-ax, vy=by-ay; const wx=px-ax, wy=py-ay;
+  const c1 = vx*wx + vy*wy;
+  if (c1<=0) return Math.hypot(px-ax, py-ay);
+  const c2 = vx*vx + vy*vy;
+  if (c2<=c1) return Math.hypot(px-bx, py-by);
+  const t = c1/c2;
+  const projx = ax + t*vx, projy = ay + t*vy;
+  return Math.hypot(px-projx, py-projy);
+}
+function pointOnPolygonEdge(pt, poly, eps=3){
+  for(let i=0;i<poly.length;i++){
+    const a=poly[i], b=poly[(i+1)%poly.length];
+    if (distPointToSeg(pt[0],pt[1], a[0],a[1], b[0],b[1]) <= eps) return true;
+  }
+  return false;
+}
+
+function randomPolygon(){
+  const MARGIN = 20 + Math.random()*140;
+  const cx = cv.width/2, cy=cv.height/2;
+  const n = 9 + Math.floor(Math.random()*7);
+  const pts=[]; let ang=Math.random()*Math.PI*2;
+  for(let i=0;i<n;i++){
+    ang += (Math.PI*2)/n + (Math.random()-0.5)*0.35;
+    const r = (Math.min(cv.width,cv.height)* (0.32 + Math.random()*0.40));
+    pts.push([cx+Math.cos(ang)*r, cy+Math.sin(ang)*r]);
+  }
+  const bb=bbox(pts); const sx=(cv.width-2*MARGIN)/bb.w; const sy=(cv.height-2*MARGIN)/bb.h; const s=Math.min(sx,sy)*0.98;
+  return pts.map(([x,y])=>[(x-(bb.minX+bb.w/2))*s+cx,(y-(bb.minY+bb.h/2))*s+cy]);
+}
+
+function setupLevel(){
+  polygon = randomPolygon();
+  originalArea = area(polygon);
+  currentArea  = originalArea;
+  stepsLeft = 3 + Math.floor(Math.random()*(5 - 2 + 1));
+  targetPercent = Math.floor(Math.random() * (TARGET_RANGE[1] - TARGET_RANGE[0] + 1)) + TARGET_RANGE[0];
+  updateHUD();
+}
+
+function updateHUD(){
+  hud.stars.textContent = stars;
+  hud.curPct.textContent = (currentArea/originalArea*100).toFixed(2)+'%';
+  hud.curAbs.textContent = Math.round(currentArea)+' px²';
+  hud.target.textContent = targetPercent.toFixed(0)+'% ±'+TOL;
+  hud.steps.textContent = stepsLeft;
+}
+
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if (polygon && polygon.length>=3){
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#111827';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(polygon[0][0], polygon[0][1]);
+    for(let i=1;i<polygon.length;i++) ctx.lineTo(polygon[i][0], polygon[i][1]);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+
+  if (screen==='play' && clickA && mouse){
+    const A=clickA, B=mouse; const [E1,E2]=extendLine(A,B);
+    const ints=[]; for(let i=0;i<polygon.length;i++){ const P=polygon[i], Q=polygon[(i+1)%polygon.length]; const r=segIntersect(E1,E2,P,Q); if(r) ints.push(r); }
+    const uniq=[]; for(const p of ints){ if(!uniq.some(q=>Math.hypot(q.x-p.x,q.y-p.y)<1e-5)) uniq.push(p); }
+    const ok = uniq.length===2;
+    ctx.strokeStyle = ok? '#22c55e' : '#ef4444'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(B[0],B[1]); ctx.stroke();
+    for(const p of uniq){ ctx.fillStyle = ok? '#22c55e' : '#ef4444'; ctx.beginPath(); ctx.arc(p.x,p.y,4,0,Math.PI*2); ctx.fill(); }
+  }
+
+  if (flash){
+    const now = performance.now();
+    if (now < flash.until){
+      const alpha = 0.6 + 0.4*Math.abs(Math.sin(now/120));
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = flash.color;
+      ctx.font = 'bold 64px system-ui';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(flash.text, cv.width - 40, cv.height/2);
+      ctx.restore();
+    } else flash = null;
+  }
+
+  if (starFlash){
+    const now = performance.now();
+    if (now < starFlash.until){
+      const alpha = 0.7 + 0.3*Math.abs(Math.sin(now/150));
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#FFD700';
+      ctx.font = 'bold 80px system-ui';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      const starStr = '⭐'.repeat(starFlash.count);
+      ctx.fillText(starStr, 40, cv.height/2);
+      ctx.restore();
+    } else starFlash = null;
+  }
+}
+
+function showFlash(text, color){
+  flash = { text, color, until: performance.now() + 1000 };
+}
+function showStarFlash(count){
+  starFlash = { count, until: performance.now() + 1000 };
+}
+
+function splitPolygon(A,B){
+  const [E1,E2]=extendLine(A,B);
+  const inter=[]; for(let i=0;i<polygon.length;i++){ const P=polygon[i], Q=polygon[(i+1)%polygon.length]; const r=segIntersect(E1,E2,P,Q); if(r) inter.push({pt:r, edge:i}); }
+  const uniq=[]; for(const it of inter){ const k=uniq.findIndex(u=>Math.hypot(u.pt.x-it.pt.x,u.pt.y-it.pt.y)<1e-6); if(k<0) uniq.push(it); }
+  if (uniq.length!==2) return null; const I1=uniq[0], I2=uniq[1];
+  function pointOn(edge,t){ const A=polygon[edge], B=polygon[(edge+1)%polygon.length]; return [lerp(A[0],B[0],t), lerp(A[1],B[1],t)]; }
+  function edgeParam(edge,pt){ const A=polygon[edge], B=polygon[(edge+1)%polygon.length]; const dx=B[0]-A[0], dy=B[1]-A[1]; const len2=dx*dx+dy*dy||1; return ((pt[0]-A[0])*dx + (pt[1]-A[1])*dy)/len2; }
+  const t1=edgeParam(I1.edge,[I1.pt.x,I1.pt.y]); const t2=edgeParam(I2.edge,[I2.pt.x,I2.pt.y]);
+  function path(fromEdge,fromT,toEdge,toT){ const out=[]; out.push(pointOn(fromEdge,fromT)); let e=fromEdge; while(e!==toEdge){ const v=(e+1)%polygon.length; out.push([polygon[v][0],polygon[v][1]]); e=v; } out.push(pointOn(toEdge,toT)); return out; }
+  const poly1=path(I1.edge,t1,I2.edge,t2); const poly2=path(I2.edge,t2,I1.edge,t1); poly1.push([I1.pt.x,I1.pt.y]); poly2.push([I2.pt.x,I2.pt.y]);
+  function dedup(p){ const out=[]; for(const q of p){ if(!out.length||Math.hypot(out[out.length-1][0]-q[0], out[out.length-1][1]-q[1])>1e-6) out.push(q); } return out; }
+  return [dedup(poly1), dedup(poly2)];
+}
+
+cv.addEventListener('mousemove', (e)=>{ mouse=[e.clientX,e.clientY]; if (screen==='play' && clickA) draw(); });
+cv.addEventListener('click', (e)=>{
+  if (screen==='front'){ screen='play'; setupLevel(); draw(); return; }
+  if (screen==='lose'){ screen='play'; setupLevel(); draw(); return; }
+  if (screen==='win'){ stars=0; skill=0; tier=0; screen='front'; draw(); return; }
+  if (screen!=='play' || stepsLeft<=0) return;
+
+  const click = [e.clientX, e.clientY];
+  if (!clickA){
+    const inside = pointInPoly(click, polygon);
+    const onEdge = pointOnPolygonEdge(click, polygon, 3);
+    if (inside && !onEdge){ showFlash('start on edge / outside', '#ef4444'); return; }
+    clickA = click; draw(); return;
+  }
+  const A=clickA, B=click; clickA=null;
+  const [E1,E2]=extendLine(A,B);
+  const ints=[]; for(let i=0;i<polygon.length;i++){ const P=polygon[i], Q=polygon[(i+1)%polygon.length]; const r=segIntersect(E1,E2,P,Q); if(r) ints.push(r); }
+  const uniq=[]; for(const p of ints){ if(!uniq.some(q=>Math.hypot(q.x-p.x,q.y-p.y)<1e-6)) uniq.push(p); }
+  if (uniq.length!==2){ draw(); return; }
+
+  const res = splitPolygon(A,B); if (!res){ draw(); return; }
+  let [p1,p2] = res;
+  const a1 = area(p1), a2 = area(p2);
+  const minPiece = currentArea * 0.01;
+  const smaller  = Math.min(a1, a2);
+  const larger   = Math.max(a1, a2);
+  if (smaller < minPiece){ draw(); return; }
+
+  const removedPctRaw = (smaller / currentArea) * 100;
+  const removedPctChk = Number(removedPctRaw.toFixed(CHECK_DECIMALS));
+cutSound.currentTime = 0; // чтобы звук играл каждый раз
+cutSound.play().catch(()=>{});
+  const tolLow = targetPercent - TOL;
+  const tolHigh = targetPercent + TOL;
+
+  showFlash(`-${removedPctChk.toFixed(2)}%`, '#ef4444');
+
+  if (removedPctChk >= tolLow && removedPctChk <= tolHigh){
+    // Play success sound
+    const successSound = new Audio('success.mp3'); // путь к файлу
+    successSound.play();
+
+    const bonusStars = stepsLeft - 1;
+    stars += 1 + bonusStars;
+    showStarFlash(1 + bonusStars);
+    if (stars >= STAR_GOAL){ screen='win'; s('youwin').style.display='flex'; return; }
+    setupLevel();
+    return;
+  } else {
+    polygon = (a1 < a2)? p2 : p1;
+    currentArea = area(polygon);
+    stepsLeft--;
+    if (stepsLeft<=0){ screen='lose'; s('youlose').style.display='flex'; return; }
+    updateHUD();
+  }
+});
+
+document.getElementById('startBtn').onclick=()=>{ document.getElementById('front').style.display='none'; screen='play'; setupLevel(); draw(); };
+document.getElementById('retryBtn').onclick=()=>{ document.getElementById('youlose').style.display='none'; screen='play'; setupLevel(); draw(); };
+document.getElementById('playAgainBtn').onclick=()=>{ document.getElementById('youwin').style.display='none'; screen='front'; draw(); };
+
+function loop(){ draw(); requestAnimationFrame(loop); }
+sizeCanvas(); document.getElementById('front').style.display='flex'; loop();
+</script>
+</body>
+</html>
