@@ -278,10 +278,31 @@ cutSound.play().catch(()=>{});
 
 document.getElementById('startBtn').onclick=()=>{ document.getElementById('front').style.display='none'; screen='play'; setupLevel(); draw(); };
 document.getElementById('retryBtn').onclick=()=>{ document.getElementById('youlose').style.display='none'; screen='play'; setupLevel(); draw(); };
-document.getElementById('playAgainBtn').onclick=()=>{ document.getElementById('youwin').style.display='none'; screen='front'; draw(); };
+document.getElementById('playAgainBtn').onclick=()=>{
+  // скрываем оверлей победы
+  document.getElementById('youwin').style.display='none';
+  // полный сброс прогресса
+  stars = 0;
+  skill = 0;
+  tier  = 0;
+  stepsLeft = 0;
+  targetPercent = 0;
+  polygon = [];
+  originalArea = 1;
+  currentArea  = 1;
+  clickA = null;
+  mouse  = null;
+  flash = null;
+  starFlash = null;
+  updateHUD();           // чтобы HUD не показывал старые числа
+  screen = 'front';
+  draw();
+};
+
 
 function loop(){ draw(); requestAnimationFrame(loop); }
 sizeCanvas(); document.getElementById('front').style.display='flex'; loop();
 </script>
 </body>
 </html>
+
